@@ -16,6 +16,7 @@
 # under the License.
 from __future__ import annotations
 
+import atexit
 import datetime
 import logging
 import os
@@ -274,7 +275,7 @@ class SafeOtelLogger:
         *,
         tags: Attributes = None,
     ) -> None:
-        """OTel does not have a native timer, stored as a Gauge whose value is number of seconds elapsed."""
+        """OTel does not have a native timer, stored as a Gauge whose value is elapsed ms."""
         if self.metrics_validator.test(stat) and name_is_otel_safe(self.prefix, stat):
             if isinstance(dt, datetime.timedelta):
                 dt = dt.total_seconds() * 1000.0
@@ -373,8 +374,16 @@ class MetricsMap:
         self.map[key].set_value(value, delta)
 
 
+def flush_otel_metrics():
+    provider = metrics.get_meter_provider()
+    provider.force_flush()
+
+
+def atexit_register_metrics_flush():
+    atexit.register(flush_otel_metrics)
+
+
 def get_otel_logger(
-    cls,
     *,
     host: str | None = None,
     port: int | None = None,
@@ -399,6 +408,9 @@ def get_otel_logger(
     # https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/#periodic-exporting-metricreader
     if interval := os.environ.get("OTEL_METRIC_EXPORT_INTERVAL", conf_interval):
         interval = float(interval)
+    else:
+        # If the env variable is an empty string.
+        interval = None
     log.info("[Metric Exporter] Connecting to OpenTelemetry Collector at %s", endpoint)
     readers = [
         PeriodicExportingMetricReader(
@@ -408,7 +420,10 @@ def get_otel_logger(
     ]
 
     if debug:
-        export_to_console = PeriodicExportingMetricReader(ConsoleMetricExporter())
+        export_to_console = PeriodicExportingMetricReader(
+            ConsoleMetricExporter(),
+            export_interval_millis=interval,
+        )
         readers.append(export_to_console)
 
     metrics.set_meter_provider(
@@ -418,6 +433,9 @@ def get_otel_logger(
             shutdown_on_exit=False,
         ),
     )
+
+    # Register a hook that flushes any in-memory metrics at shutdown.
+    atexit_register_metrics_flush()
 
     validator = get_validator(metrics_allow_list, metrics_block_list)
 

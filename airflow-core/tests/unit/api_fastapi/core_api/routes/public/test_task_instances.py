@@ -26,17 +26,15 @@ from unittest import mock
 
 import pendulum
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, func, select, update
 
 from airflow._shared.timezones.timezone import datetime
 from airflow.dag_processing.bundles.manager import DagBundlesManager
 from airflow.dag_processing.dagbag import DagBag, sync_bag_to_db
 from airflow.jobs.job import Job
 from airflow.jobs.triggerer_job_runner import TriggererJobRunner
-from airflow.listeners.listener import get_listener_manager
 from airflow.models import DagRun, Log, TaskInstance
 from airflow.models.dag_version import DagVersion
-from airflow.models.hitl import HITLDetail
 from airflow.models.renderedtifields import RenderedTaskInstanceFields as RTIF
 from airflow.models.taskinstancehistory import TaskInstanceHistory
 from airflow.models.taskmap import TaskMap
@@ -48,6 +46,7 @@ from airflow.utils.types import DagRunType
 
 from tests_common.test_utils.api_fastapi import _check_task_instance_note
 from tests_common.test_utils.asserts import assert_queries_count
+from tests_common.test_utils.config import conf_vars
 from tests_common.test_utils.db import (
     clear_db_runs,
     clear_rendered_ti_fields,
@@ -55,9 +54,6 @@ from tests_common.test_utils.db import (
 from tests_common.test_utils.logs import check_last_log
 from tests_common.test_utils.mock_operators import MockOperator
 from tests_common.test_utils.taskinstance import create_task_instance
-
-if TYPE_CHECKING:
-    from tests_common.pytest_plugin import CreateTaskInstance
 
 pytestmark = pytest.mark.db_test
 
@@ -184,7 +180,7 @@ class TestGetTaskInstance(TestTaskInstanceEndpoint):
         # This prevents issue when users upgrade to 2.0+
         # from 1.10.x
         # https://github.com/apache/airflow/issues/14421
-        session.query(TaskInstance).update({TaskInstance.operator: None}, synchronize_session="fetch")
+        session.execute(update(TaskInstance).values(operator=None))
         session.commit()
         response = test_client.get(
             "/dags/example_python_operator/dagRuns/TEST_DAG_RUN_ID/taskInstances/print_the_context"
@@ -219,7 +215,7 @@ class TestGetTaskInstance(TestTaskInstanceEndpoint):
             "pid": 100,
             "pool": "default_pool",
             "pool_slots": 1,
-            "priority_weight": 9,
+            "priority_weight": 14,
             "queue": "default_queue",
             "queued_when": None,
             "scheduled_when": None,
@@ -377,7 +373,7 @@ class TestGetTaskInstance(TestTaskInstanceEndpoint):
             "pid": 100,
             "pool": "default_pool",
             "pool_slots": 1,
-            "priority_weight": 9,
+            "priority_weight": 14,
             "queue": "default_queue",
             "queued_when": None,
             "scheduled_when": None,
@@ -441,7 +437,7 @@ class TestGetTaskInstance(TestTaskInstanceEndpoint):
             "pid": 100,
             "pool": "default_pool",
             "pool_slots": 1,
-            "priority_weight": 9,
+            "priority_weight": 14,
             "queue": "default_queue",
             "queued_when": None,
             "scheduled_when": None,
@@ -461,7 +457,6 @@ class TestGetTaskInstance(TestTaskInstanceEndpoint):
 
     def test_should_respond_200_task_instance_with_rendered(self, test_client, session):
         tis = self.create_task_instances(session)
-        session.query()
         rendered_fields = RTIF(tis[0], render_templates=False)
         session.add(rendered_fields)
         session.commit()
@@ -498,7 +493,7 @@ class TestGetTaskInstance(TestTaskInstanceEndpoint):
             "pid": 100,
             "pool": "default_pool",
             "pool_slots": 1,
-            "priority_weight": 9,
+            "priority_weight": 14,
             "queue": "default_queue",
             "queued_when": None,
             "scheduled_when": None,
@@ -618,7 +613,7 @@ class TestGetMappedTaskInstance(TestTaskInstanceEndpoint):
                 "pid": 100,
                 "pool": "default_pool",
                 "pool_slots": 1,
-                "priority_weight": 9,
+                "priority_weight": 14,
                 "queue": "default_queue",
                 "queued_when": None,
                 "scheduled_when": None,
@@ -708,11 +703,13 @@ class TestGetMappedTaskInstances:
 
             if count:
                 # Remove the map_index=-1 TI when we're creating other TIs
-                session.query(TaskInstance).filter(
-                    TaskInstance.dag_id == mapped.dag_id,
-                    TaskInstance.task_id == mapped.task_id,
-                    TaskInstance.run_id == dr.run_id,
-                ).delete()
+                session.execute(
+                    delete(TaskInstance).where(
+                        TaskInstance.dag_id == mapped.dag_id,
+                        TaskInstance.task_id == mapped.task_id,
+                        TaskInstance.run_id == dr.run_id,
+                    )
+                )
 
             for index, state in enumerate(
                 itertools.chain(
@@ -837,8 +834,8 @@ class TestGetMappedTaskInstances:
             ({"order_by": "map_index", "limit": 100}, list(range(100))),
             ({"order_by": "-map_index", "limit": 100}, list(range(109, 9, -1))),
             (
-                {"order_by": "state", "limit": 108},
-                list(range(5, 25)) + list(range(25, 110)) + list(range(3)),
+                {"order_by": "state", "limit": 108},  # Maximum page limit will limit result to 100 items.
+                list(range(5, 25)) + list(range(25, 105)),
             ),
             (
                 {"order_by": "-state", "limit": 100},
@@ -853,6 +850,8 @@ class TestGetMappedTaskInstances:
     def test_mapped_instances_order(
         self, test_client, session, params, expected_map_indexes, one_task_with_many_mapped_tis
     ):
+        from airflow.configuration import conf
+
         with assert_queries_count(4):
             response = test_client.get(
                 "/dags/mapped_tis/dagRuns/run_mapped_tis/taskInstances/task_2/listMapped",
@@ -862,7 +861,7 @@ class TestGetMappedTaskInstances:
         assert response.status_code == 200
         body = response.json()
         assert body["total_entries"] == 110
-        assert len(body["task_instances"]) == params["limit"]
+        assert len(body["task_instances"]) == min(params["limit"], conf.getint("api", "maximum_page_limit"))
         assert expected_map_indexes == [ti["map_index"] for ti in body["task_instances"]]
 
     # Ordering of nulls values is DB specific.
@@ -874,14 +873,13 @@ class TestGetMappedTaskInstances:
             ({"order_by": "-rendered_map_index", "limit": 100}, [0] + list(range(11, 110)[::-1])),  # Desc
         ],
     )
+    @conf_vars({("api", "maximum_page_limit"): "110"})
     def test_rendered_map_index_order(
         self, test_client, session, params, expected_map_indexes, one_task_with_many_mapped_tis
     ):
-        ti = (
-            session.query(TaskInstance)
-            .where(TaskInstance.task_id == "task_2", TaskInstance.map_index == 0)
-            .first()
-        )
+        ti = session.scalars(
+            select(TaskInstance).where(TaskInstance.task_id == "task_2", TaskInstance.map_index == 0)
+        ).first()
 
         ti._rendered_map_index = "a"
 
@@ -1410,7 +1408,7 @@ class TestGetTaskInstances(TestTaskInstanceEndpoint):
                 False,
                 "/dags/~/dagRuns/~/taskInstances",
                 {"dag_id_pattern": "example_python_operator"},
-                9,  # Based on test failure - example_python_operator creates 9 task instances
+                14,  # Based on test failure - example_python_operator creates 14 task instances
                 3,
                 id="test dag_id_pattern exact match",
             ),
@@ -1419,7 +1417,7 @@ class TestGetTaskInstances(TestTaskInstanceEndpoint):
                 False,
                 "/dags/~/dagRuns/~/taskInstances",
                 {"dag_id_pattern": "example_%"},
-                17,  # Based on test failure - both DAGs together create 17 task instances
+                22,  # Based on test failure - both DAGs together create 22 task instances
                 3,
                 id="test dag_id_pattern wildcard prefix",
             ),
@@ -1540,7 +1538,11 @@ class TestGetTaskInstances(TestTaskInstanceEndpoint):
         )
 
         assert response.status_code == 200
-        count = session.query(TaskInstance).filter(TaskInstance.dag_id == "example_python_operator").count()
+        count = session.scalar(
+            select(func.count())
+            .select_from(TaskInstance)
+            .where(TaskInstance.dag_id == "example_python_operator")
+        )
         assert count == response.json()["total_entries"]
         assert count == len(response.json()["task_instances"])
 
@@ -1581,7 +1583,9 @@ class TestGetTaskInstances(TestTaskInstanceEndpoint):
             dag_id=dag_id,
         )
 
-        ti_count = session.query(TaskInstance).filter(TaskInstance.dag_id == dag_id).count()
+        ti_count = session.scalar(
+            select(func.count()).select_from(TaskInstance).where(TaskInstance.dag_id == dag_id)
+        )
 
         # Ascending order
         response_asc = test_client.get("/dags/~/dagRuns/~/taskInstances", params={"order_by": order_by_field})
@@ -1633,7 +1637,9 @@ class TestGetTaskInstances(TestTaskInstanceEndpoint):
         assert len(response_batch2.json()["task_instances"]) > 0
 
         # Match
-        ti_count = session.query(TaskInstance).filter(TaskInstance.dag_id == dag_id).count()
+        ti_count = session.scalar(
+            select(func.count()).select_from(TaskInstance).where(TaskInstance.dag_id == dag_id)
+        )
         assert response_batch1.json()["total_entries"] == response_batch2.json()["total_entries"] == ti_count
         assert (num_entries_batch1 + num_entries_batch2) == ti_count
         assert response_batch1 != response_batch2
@@ -1853,7 +1859,9 @@ class TestGetTaskInstancesBatch(TestTaskInstanceEndpoint):
             dag_id=dag_id,
         )
 
-        ti_count = session.query(TaskInstance).filter(TaskInstance.dag_id == dag_id).count()
+        ti_count = session.scalar(
+            select(func.count()).select_from(TaskInstance).where(TaskInstance.dag_id == dag_id)
+        )
 
         # Ascending order
         response_asc = test_client.post(
@@ -1923,8 +1931,8 @@ class TestGetTaskInstancesBatch(TestTaskInstanceEndpoint):
         [
             pytest.param(
                 {"dag_ids": ["example_python_operator", "example_skip_dag"]},
-                17,
-                17,
+                22,
+                22,
                 id="with dag filter",
             ),
         ],
@@ -2033,7 +2041,7 @@ class TestGetTaskInstancesBatch(TestTaskInstanceEndpoint):
         assert len(response_batch2.json()["task_instances"]) > 0
 
         # Match
-        ti_count = 9
+        ti_count = 10
         assert response_batch1.json()["total_entries"] == response_batch2.json()["total_entries"] == ti_count
         assert (num_entries_batch1 + num_entries_batch2) == ti_count
         assert response_batch1 != response_batch2
@@ -2072,7 +2080,7 @@ class TestGetTaskInstanceTry(TestTaskInstanceEndpoint):
             "pid": 100,
             "pool": "default_pool",
             "pool_slots": 1,
-            "priority_weight": 9,
+            "priority_weight": 14,
             "queue": "default_queue",
             "queued_when": None,
             "scheduled_when": None,
@@ -2093,7 +2101,6 @@ class TestGetTaskInstanceTry(TestTaskInstanceEndpoint):
                 "id": response_data["dag_version"]["id"],
                 "version_number": 1,
             },
-            "hitl_detail": None,
         }
 
     @pytest.mark.parametrize("try_number", [1, 2])
@@ -2119,7 +2126,7 @@ class TestGetTaskInstanceTry(TestTaskInstanceEndpoint):
             "pid": 100,
             "pool": "default_pool",
             "pool_slots": 1,
-            "priority_weight": 9,
+            "priority_weight": 14,
             "queue": "default_queue",
             "queued_when": None,
             "scheduled_when": None,
@@ -2140,7 +2147,6 @@ class TestGetTaskInstanceTry(TestTaskInstanceEndpoint):
                 "id": response_data["dag_version"]["id"],
                 "version_number": 1,
             },
-            "hitl_detail": None,
         }
 
     @pytest.mark.parametrize("try_number", [1, 2])
@@ -2159,7 +2165,7 @@ class TestGetTaskInstanceTry(TestTaskInstanceEndpoint):
                 setattr(ti, attr, getattr(old_ti, attr))
             session.add(ti)
         session.commit()
-        tis = session.query(TaskInstance).all()
+        tis = session.scalars(select(TaskInstance)).all()
         # Record the task instance history
         from airflow.models.taskinstance import clear_task_instances
 
@@ -2171,7 +2177,7 @@ class TestGetTaskInstanceTry(TestTaskInstanceEndpoint):
                 ti.queue = "default_queue"
                 session.merge(ti)
         session.commit()
-        tis = session.query(TaskInstance).all()
+        tis = session.scalars(select(TaskInstance)).all()
         # in each loop, we should get the right mapped TI back
         for map_index in (1, 2):
             # Get the info from TIHistory: try_number 1, try_number 2 is TI table(latest)
@@ -2197,7 +2203,7 @@ class TestGetTaskInstanceTry(TestTaskInstanceEndpoint):
                 "pid": 100,
                 "pool": "default_pool",
                 "pool_slots": 1,
-                "priority_weight": 9,
+                "priority_weight": 14,
                 "queue": "default_queue",
                 "queued_when": None,
                 "scheduled_when": None,
@@ -2218,7 +2224,6 @@ class TestGetTaskInstanceTry(TestTaskInstanceEndpoint):
                     "id": response_data["dag_version"]["id"],
                     "version_number": 1,
                 },
-                "hitl_detail": None,
             }
 
     def test_should_respond_200_with_task_state_in_deferred(self, test_client, session):
@@ -2240,11 +2245,11 @@ class TestGetTaskInstanceTry(TestTaskInstanceEndpoint):
         TaskInstanceHistory.record_ti(ti, session=session)
         session.flush()
         # Change TaskInstance try_number to 2, ensuring api checks TIHistory
-        ti = session.query(TaskInstance).one_or_none()
+        ti = session.scalars(select(TaskInstance)).one_or_none()
         ti.try_number = 2
         session.merge(ti)
         # Set duration and end_date in TaskInstanceHistory for easy testing
-        tih = session.query(TaskInstanceHistory).all()[0]
+        tih = session.scalars(select(TaskInstanceHistory).limit(1)).one()
         tih.duration = 10000
         tih.end_date = self.default_time + dt.timedelta(days=2)
         session.merge(tih)
@@ -2270,7 +2275,7 @@ class TestGetTaskInstanceTry(TestTaskInstanceEndpoint):
             "pid": 100,
             "pool": "default_pool",
             "pool_slots": 1,
-            "priority_weight": 9,
+            "priority_weight": 14,
             "queue": "default_queue",
             "queued_when": None,
             "scheduled_when": None,
@@ -2291,7 +2296,6 @@ class TestGetTaskInstanceTry(TestTaskInstanceEndpoint):
                 "id": response_data["dag_version"]["id"],
                 "version_number": 1,
             },
-            "hitl_detail": None,
         }
 
     def test_should_respond_200_with_task_state_in_removed(self, test_client, session):
@@ -2318,7 +2322,7 @@ class TestGetTaskInstanceTry(TestTaskInstanceEndpoint):
             "pid": 100,
             "pool": "default_pool",
             "pool_slots": 1,
-            "priority_weight": 9,
+            "priority_weight": 14,
             "queue": "default_queue",
             "queued_when": None,
             "scheduled_when": None,
@@ -2338,77 +2342,6 @@ class TestGetTaskInstanceTry(TestTaskInstanceEndpoint):
                 "dag_id": "example_python_operator",
                 "id": response_data["dag_version"]["id"],
                 "version_number": 1,
-            },
-            "hitl_detail": None,
-        }
-
-    def test_should_respond_200_with_hitl(
-        self, test_client, create_task_instance: CreateTaskInstance, session
-    ):
-        ti = create_task_instance(dag_id="test_hitl_dag", task_id="sample_task_hitl")
-        ti.try_number = 1
-        session.add(ti)
-        hitl_detail = HITLDetail(
-            ti_id=ti.id,
-            options=["Approve", "Reject"],
-            subject="This is subject",
-            body="this is body",
-            defaults=["Approve"],
-            multiple=False,
-            params={"input_1": 1},
-            assignees=None,
-        )
-        session.add(hitl_detail)
-        session.commit()
-        # Record the TaskInstanceHistory
-        TaskInstanceHistory.record_ti(ti, session=session)
-        session.flush()
-
-        response = test_client.get(
-            f"/dags/{ti.dag_id}/dagRuns/{ti.run_id}/taskInstances/{ti.task_id}/tries/1",
-        )
-        assert response.status_code == 200
-        assert response.json() == {
-            "dag_id": "test_hitl_dag",
-            "dag_display_name": "test_hitl_dag",
-            "duration": None,
-            "end_date": mock.ANY,
-            "executor": None,
-            "executor_config": "{}",
-            "hostname": "",
-            "map_index": -1,
-            "max_tries": 0,
-            "operator": "EmptyOperator",
-            "operator_name": "EmptyOperator",
-            "pid": None,
-            "pool": "default_pool",
-            "pool_slots": 1,
-            "priority_weight": 1,
-            "queue": "default",
-            "queued_when": None,
-            "scheduled_when": None,
-            "start_date": None,
-            "state": None,
-            "task_id": "sample_task_hitl",
-            "task_display_name": "sample_task_hitl",
-            "try_number": 1,
-            "unixname": getuser(),
-            "dag_run_id": "test",
-            "dag_version": mock.ANY,
-            "hitl_detail": {
-                "assigned_users": [],
-                "body": "this is body",
-                "chosen_options": None,
-                "created_at": mock.ANY,
-                "defaults": ["Approve"],
-                "multiple": False,
-                "options": ["Approve", "Reject"],
-                "params": {"input_1": {"value": 1, "description": None, "schema": {}}},
-                "params_input": {},
-                "responded_at": None,
-                "responded_by_user": None,
-                "response_received": False,
-                "subject": "This is subject",
             },
         }
 
@@ -2489,7 +2422,6 @@ class TestGetTaskInstanceTry(TestTaskInstanceEndpoint):
                 "created_at": mock.ANY,
                 "dag_display_name": "dag_with_multiple_versions",
             },
-            "hitl_detail": None,
         }
 
     @pytest.mark.parametrize(
@@ -2544,7 +2476,6 @@ class TestGetTaskInstanceTry(TestTaskInstanceEndpoint):
                 "created_at": mock.ANY,
                 "dag_display_name": "dag_with_multiple_versions",
             },
-            "hitl_detail": None,
         }
 
     def test_should_not_return_duplicate_runs(self, test_client, session):
@@ -3118,7 +3049,9 @@ class TestPostClearTaskInstances(TestTaskInstanceEndpoint):
             json=payload,
         )
 
-        failed_dag_runs = session.query(DagRun).filter(DagRun.state == "failed").count()
+        failed_dag_runs = session.scalar(
+            select(func.count()).select_from(DagRun).where(DagRun.state == "failed")
+        )
         assert response.status_code == 200
         expected_response = [
             {
@@ -3233,7 +3166,7 @@ class TestPostClearTaskInstances(TestTaskInstanceEndpoint):
                 "pid": 100,
                 "pool": "default_pool",
                 "pool_slots": 1,
-                "priority_weight": 9,
+                "priority_weight": 14,
                 "queue": "default_queue",
                 "queued_when": None,
                 "scheduled_when": None,
@@ -3565,10 +3498,10 @@ class TestPostClearTaskInstances(TestTaskInstanceEndpoint):
             json=payload,
         )
 
-        logs = (
-            session.query(Log)
-            .filter(Log.dag_id == dag_id, Log.run_id == dag_run_id, Log.event == event)
-            .count()
+        logs = session.scalar(
+            select(func.count())
+            .select_from(Log)
+            .where(Log.dag_id == dag_id, Log.run_id == dag_run_id, Log.event == event)
         )
 
         assert response.status_code == 200
@@ -3605,7 +3538,7 @@ class TestGetTaskInstanceTries(TestTaskInstanceEndpoint):
                     "pid": 100,
                     "pool": "default_pool",
                     "pool_slots": 1,
-                    "priority_weight": 9,
+                    "priority_weight": 14,
                     "queue": "default_queue",
                     "queued_when": None,
                     "scheduled_when": None,
@@ -3626,7 +3559,6 @@ class TestGetTaskInstanceTries(TestTaskInstanceEndpoint):
                         "id": response_data["task_instances"][0]["dag_version"]["id"],
                         "version_number": 1,
                     },
-                    "hitl_detail": None,
                 },
                 {
                     "dag_id": "example_python_operator",
@@ -3643,7 +3575,7 @@ class TestGetTaskInstanceTries(TestTaskInstanceEndpoint):
                     "pid": 100,
                     "pool": "default_pool",
                     "pool_slots": 1,
-                    "priority_weight": 9,
+                    "priority_weight": 14,
                     "queue": "default_queue",
                     "queued_when": None,
                     "scheduled_when": None,
@@ -3664,86 +3596,9 @@ class TestGetTaskInstanceTries(TestTaskInstanceEndpoint):
                         "id": response_data["task_instances"][1]["dag_version"]["id"],
                         "version_number": 1,
                     },
-                    "hitl_detail": None,
                 },
             ],
             "total_entries": 2,
-        }
-
-    def test_should_respond_200_with_hitl(
-        self, test_client, create_task_instance: CreateTaskInstance, session
-    ):
-        ti = create_task_instance(dag_id="test_hitl_dag", task_id="sample_task_hitl")
-        ti.try_number = 1
-        session.add(ti)
-        hitl_detail = HITLDetail(
-            ti_id=ti.id,
-            options=["Approve", "Reject"],
-            subject="This is subject",
-            body="this is body",
-            defaults=["Approve"],
-            multiple=False,
-            params={"input_1": 1},
-            assignees=None,
-        )
-        session.add(hitl_detail)
-        session.commit()
-        # Record the TaskInstanceHistory
-        TaskInstanceHistory.record_ti(ti, session=session)
-        session.flush()
-
-        with assert_queries_count(3):
-            response = test_client.get(
-                f"/dags/{ti.dag_id}/dagRuns/{ti.run_id}/taskInstances/{ti.task_id}/tries",
-            )
-        assert response.status_code == 200
-        assert response.json() == {
-            "task_instances": [
-                {
-                    "dag_id": "test_hitl_dag",
-                    "dag_display_name": "test_hitl_dag",
-                    "duration": None,
-                    "end_date": mock.ANY,
-                    "executor": None,
-                    "executor_config": "{}",
-                    "hostname": "",
-                    "map_index": -1,
-                    "max_tries": 0,
-                    "operator": "EmptyOperator",
-                    "operator_name": "EmptyOperator",
-                    "pid": None,
-                    "pool": "default_pool",
-                    "pool_slots": 1,
-                    "priority_weight": 1,
-                    "queue": "default",
-                    "queued_when": None,
-                    "scheduled_when": None,
-                    "start_date": None,
-                    "state": None,
-                    "task_id": "sample_task_hitl",
-                    "task_display_name": "sample_task_hitl",
-                    "try_number": 1,
-                    "unixname": getuser(),
-                    "dag_run_id": "test",
-                    "dag_version": mock.ANY,
-                    "hitl_detail": {
-                        "assigned_users": [],
-                        "body": "this is body",
-                        "chosen_options": None,
-                        "created_at": mock.ANY,
-                        "defaults": ["Approve"],
-                        "multiple": False,
-                        "options": ["Approve", "Reject"],
-                        "params": {"input_1": {"value": 1, "description": None, "schema": {}}},
-                        "params_input": {},
-                        "responded_at": None,
-                        "responded_by_user": None,
-                        "response_received": False,
-                        "subject": "This is subject",
-                    },
-                },
-            ],
-            "total_entries": 1,
         }
 
     def test_should_respond_401(self, unauthenticated_test_client):
@@ -3762,7 +3617,7 @@ class TestGetTaskInstanceTries(TestTaskInstanceEndpoint):
         self.create_task_instances(
             session=session, task_instances=[{"state": State.SUCCESS}], with_ti_history=True
         )
-        ti = session.query(TaskInstance).one()
+        ti = session.scalars(select(TaskInstance)).one()
         ti.state = State.UP_FOR_RETRY
         session.merge(ti)
         session.commit()
@@ -3791,7 +3646,7 @@ class TestGetTaskInstanceTries(TestTaskInstanceEndpoint):
                     "pid": 100,
                     "pool": "default_pool",
                     "pool_slots": 1,
-                    "priority_weight": 9,
+                    "priority_weight": 14,
                     "queue": "default_queue",
                     "queued_when": None,
                     "scheduled_when": None,
@@ -3812,7 +3667,6 @@ class TestGetTaskInstanceTries(TestTaskInstanceEndpoint):
                         "id": response_data["task_instances"][0]["dag_version"]["id"],
                         "version_number": 1,
                     },
-                    "hitl_detail": None,
                 },
             ],
             "total_entries": 1,
@@ -3830,7 +3684,7 @@ class TestGetTaskInstanceTries(TestTaskInstanceEndpoint):
             ti.try_number = 1
             session.add(ti)
         session.commit()
-        tis = session.query(TaskInstance).all()
+        tis = session.scalars(select(TaskInstance)).all()
 
         # Record the task instance history
         from airflow.models.taskinstance import clear_task_instances
@@ -3875,7 +3729,7 @@ class TestGetTaskInstanceTries(TestTaskInstanceEndpoint):
                         "pid": 100,
                         "pool": "default_pool",
                         "pool_slots": 1,
-                        "priority_weight": 9,
+                        "priority_weight": 14,
                         "queue": "default_queue",
                         "queued_when": None,
                         "scheduled_when": None,
@@ -3896,7 +3750,6 @@ class TestGetTaskInstanceTries(TestTaskInstanceEndpoint):
                             "id": response_data["task_instances"][0]["dag_version"]["id"],
                             "version_number": 1,
                         },
-                        "hitl_detail": None,
                     },
                     {
                         "dag_id": "example_python_operator",
@@ -3913,7 +3766,7 @@ class TestGetTaskInstanceTries(TestTaskInstanceEndpoint):
                         "pid": 100,
                         "pool": "default_pool",
                         "pool_slots": 1,
-                        "priority_weight": 9,
+                        "priority_weight": 14,
                         "queue": "default_queue",
                         "queued_when": None,
                         "scheduled_when": None,
@@ -3934,7 +3787,6 @@ class TestGetTaskInstanceTries(TestTaskInstanceEndpoint):
                             "id": response_data["task_instances"][1]["dag_version"]["id"],
                             "version_number": 1,
                         },
-                        "hitl_detail": None,
                     },
                 ],
                 "total_entries": 2,
@@ -4006,7 +3858,6 @@ class TestGetTaskInstanceTries(TestTaskInstanceEndpoint):
                 "created_at": mock.ANY,
                 "dag_display_name": "dag_with_multiple_versions",
             },
-            "hitl_detail": None,
         }
 
     @pytest.mark.parametrize(
@@ -4061,7 +3912,6 @@ class TestGetTaskInstanceTries(TestTaskInstanceEndpoint):
                 "created_at": mock.ANY,
                 "dag_display_name": "dag_with_multiple_versions",
             },
-            "hitl_detail": None,
         }
 
 
@@ -4073,27 +3923,24 @@ class TestPatchTaskInstance(TestTaskInstanceEndpoint):
     TASK_ID = "print_the_context"
     RUN_ID = "TEST_DAG_RUN_ID"
 
-    @pytest.fixture(autouse=True)
-    def clean_listener_manager(self):
-        get_listener_manager().clear()
-        yield
-        get_listener_manager().clear()
-
     @pytest.mark.parametrize(
         ("state", "listener_state"),
         [
             ("success", [TaskInstanceState.SUCCESS]),
             ("failed", [TaskInstanceState.FAILED]),
-            ("skipped", []),
+            ("skipped", [TaskInstanceState.SKIPPED]),
+            ("running", []),
         ],
     )
-    def test_patch_task_instance_notifies_listeners(self, test_client, session, state, listener_state):
+    def test_patch_task_instance_notifies_listeners(
+        self, test_client, session, state, listener_state, listener_manager
+    ):
         from unit.listeners.class_listener import ClassBasedListener
 
         self.create_task_instances(session)
 
         listener = ClassBasedListener()
-        get_listener_manager().add_listener(listener)
+        listener_manager(listener)
         test_client.patch(
             self.ENDPOINT_URL,
             json={
@@ -4159,7 +4006,7 @@ class TestPatchTaskInstance(TestTaskInstanceEndpoint):
                     "pid": 100,
                     "pool": "default_pool",
                     "pool_slots": 1,
-                    "priority_weight": 9,
+                    "priority_weight": 14,
                     "queue": "default_queue",
                     "queued_when": None,
                     "scheduled_when": None,
@@ -4433,7 +4280,7 @@ class TestPatchTaskInstance(TestTaskInstanceEndpoint):
                             "pid": 100,
                             "pool": "default_pool",
                             "pool_slots": 1,
-                            "priority_weight": 9,
+                            "priority_weight": 14,
                             "queue": "default_queue",
                             "queued_when": None,
                             "scheduled_when": None,
@@ -4567,7 +4414,7 @@ class TestPatchTaskInstance(TestTaskInstanceEndpoint):
                     "pid": 100,
                     "pool": "default_pool",
                     "pool_slots": 1,
-                    "priority_weight": 9,
+                    "priority_weight": 14,
                     "queue": "default_queue",
                     "queued_when": None,
                     "scheduled_when": None,
@@ -4628,7 +4475,7 @@ class TestPatchTaskInstance(TestTaskInstanceEndpoint):
                     "pid": 100,
                     "pool": "default_pool",
                     "pool_slots": 1,
-                    "priority_weight": 9,
+                    "priority_weight": 14,
                     "queue": "default_queue",
                     "queued_when": None,
                     "scheduled_when": None,
@@ -4707,7 +4554,7 @@ class TestPatchTaskInstance(TestTaskInstanceEndpoint):
                         "pid": 100,
                         "pool": "default_pool",
                         "pool_slots": 1,
-                        "priority_weight": 9,
+                        "priority_weight": 14,
                         "queue": "default_queue",
                         "queued_when": None,
                         "scheduled_when": None,
@@ -4788,7 +4635,7 @@ class TestPatchTaskInstance(TestTaskInstanceEndpoint):
                 "pid": 100,
                 "pool": "default_pool",
                 "pool_slots": 1,
-                "priority_weight": 9,
+                "priority_weight": 14,
                 "queue": "default_queue",
                 "queued_when": None,
                 "scheduled_when": None,
@@ -4906,7 +4753,7 @@ class TestPatchTaskInstanceDryRun(TestTaskInstanceEndpoint):
                     "pid": 100,
                     "pool": "default_pool",
                     "pool_slots": 1,
-                    "priority_weight": 9,
+                    "priority_weight": 14,
                     "queue": "default_queue",
                     "queued_when": None,
                     "scheduled_when": None,
@@ -5192,7 +5039,7 @@ class TestPatchTaskInstanceDryRun(TestTaskInstanceEndpoint):
                             "pid": 100,
                             "pool": "default_pool",
                             "pool_slots": 1,
-                            "priority_weight": 9,
+                            "priority_weight": 14,
                             "queue": "default_queue",
                             "queued_when": None,
                             "scheduled_when": None,
@@ -5388,17 +5235,17 @@ class TestDeleteTaskInstance(TestTaskInstanceEndpoint):
     ):
         self.create_task_instances(session, task_instances=task_instances)
 
-        base_query = session.query(TaskInstance).filter(
+        base_stmt = select(TaskInstance).where(
             TaskInstance.dag_id == self.DAG_ID,
             TaskInstance.task_id == self.TASK_ID,
             TaskInstance.run_id == self.RUN_ID,
         )
 
         if map_index == -1:
-            initial_ti = base_query.filter(TaskInstance.map_index == -1).first()
+            initial_ti = session.scalars(base_stmt.where(TaskInstance.map_index == -1)).first()
             assert initial_ti is not None
         else:
-            initial_tis = base_query.filter(TaskInstance.map_index != -1).all()
+            initial_tis = session.scalars(base_stmt.where(TaskInstance.map_index != -1)).all()
             if any(isinstance(ti, dict) and "map_index" in ti for ti in task_instances):
                 expected_map_indexes = {ti["map_index"] for ti in task_instances if "map_index" in ti}
                 actual_map_indexes = {ti.map_index for ti in initial_tis}
@@ -5419,10 +5266,10 @@ class TestDeleteTaskInstance(TestTaskInstanceEndpoint):
             )
         else:
             if map_index == -1:
-                deleted_ti = base_query.filter(TaskInstance.map_index == -1).first()
+                deleted_ti = session.scalars(base_stmt.where(TaskInstance.map_index == -1)).first()
                 assert deleted_ti is None
             else:
-                remaining_tis = base_query.filter(TaskInstance.map_index != -1).all()
+                remaining_tis = session.scalars(base_stmt.where(TaskInstance.map_index != -1)).all()
                 if expected_remaining is not None:
                     assert set(ti.map_index for ti in remaining_tis) == expected_remaining
 

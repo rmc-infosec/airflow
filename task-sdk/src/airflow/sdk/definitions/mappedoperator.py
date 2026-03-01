@@ -27,6 +27,7 @@ import attrs
 import methodtools
 from lazy_object_proxy import Proxy
 
+from airflow.sdk.api.datamodels._generated import DagAttributeTypes
 from airflow.sdk.bases.xcom import BaseXCom
 from airflow.sdk.definitions._internal.abstractoperator import (
     DEFAULT_EXECUTOR,
@@ -50,8 +51,6 @@ from airflow.sdk.definitions._internal.expandinput import (
     is_mappable,
 )
 from airflow.sdk.definitions._internal.types import NOTSET
-from airflow.serialization.enums import DagAttributeTypes
-from airflow.task.priority_strategy import PriorityWeightStrategy, validate_and_load_priority_weight_strategy
 
 if TYPE_CHECKING:
     import datetime
@@ -67,6 +66,7 @@ if TYPE_CHECKING:
     )
     from airflow.sdk.definitions.operator_resources import Resources
     from airflow.sdk.definitions.param import ParamsDict
+    from airflow.task.priority_strategy import PriorityWeightStrategy
     from airflow.triggers.base import StartTriggerArgs
 
 ValidationSource = Literal["expand"] | Literal["partial"]
@@ -556,13 +556,11 @@ class MappedOperator(AbstractOperator):
 
     @property
     def weight_rule(self) -> PriorityWeightStrategy:
-        return validate_and_load_priority_weight_strategy(
-            self.partial_kwargs.get("weight_rule", DEFAULT_WEIGHT_RULE)
-        )
+        return self.partial_kwargs.get("weight_rule", DEFAULT_WEIGHT_RULE)
 
     @weight_rule.setter
     def weight_rule(self, value: str | PriorityWeightStrategy) -> None:
-        self.partial_kwargs["weight_rule"] = validate_and_load_priority_weight_strategy(value)
+        self.partial_kwargs["weight_rule"] = value
 
     @property
     def max_active_tis_per_dag(self) -> int | None:
@@ -695,6 +693,14 @@ class MappedOperator(AbstractOperator):
     @property
     def allow_nested_operators(self) -> bool:
         return bool(self.partial_kwargs.get("allow_nested_operators"))
+
+    @property
+    def render_template_as_native_obj(self) -> bool | None:
+        return self.partial_kwargs.get("render_template_as_native_obj")
+
+    @render_template_as_native_obj.setter
+    def render_template_as_native_obj(self, value: bool | None) -> None:
+        self.partial_kwargs["render_template_as_native_obj"] = value
 
     def get_dag(self) -> DAG | None:
         """Implement Operator."""

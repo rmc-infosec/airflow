@@ -754,7 +754,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "providers/http/tests/file.py",
                 ),
                 {
-                    "selected-providers-list-as-string": "amazon apache.livy atlassian.jira common.compat dbt.cloud dingding discord google http pagerduty",
+                    "selected-providers-list-as-string": "amazon apache.livy atlassian.jira common.compat dbt.cloud dingding discord google http informatica pagerduty",
                     "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
@@ -775,31 +775,31 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                         [
                             {
                                 "description": "amazon...google",
-                                "test_types": "Providers[amazon] Providers[apache.livy,atlassian.jira,common.compat,dbt.cloud,dingding,discord,http,pagerduty] Providers[google]",
+                                "test_types": "Providers[amazon] Providers[apache.livy,atlassian.jira,common.compat,dbt.cloud,dingding,discord,http,informatica,pagerduty] Providers[google]",
                             }
                         ]
                     ),
                     "individual-providers-test-types-list-as-strings-in-json": json.dumps(
                         [
                             {
-                                "description": "amazon...apache.livy",
-                                "test_types": "Providers[amazon] Providers[apache.livy]",
+                                "description": "amazon...atlassian.jir",
+                                "test_types": "Providers[amazon] Providers[apache.livy] Providers[atlassian.jira]",
                             },
                             {
-                                "description": "atlassian.jir...common.compat",
-                                "test_types": "Providers[atlassian.jira] Providers[common.compat]",
+                                "description": "common.compat...dbt.cloud",
+                                "test_types": "Providers[common.compat] Providers[dbt.cloud]",
                             },
                             {
-                                "description": "dbt.cloud...dingding",
-                                "test_types": "Providers[dbt.cloud] Providers[dingding]",
+                                "description": "dingding...discord",
+                                "test_types": "Providers[dingding] Providers[discord]",
                             },
                             {
-                                "description": "discord...google",
-                                "test_types": "Providers[discord] Providers[google]",
+                                "description": "google...http",
+                                "test_types": "Providers[google] Providers[http]",
                             },
                             {
-                                "description": "http...pagerduty",
-                                "test_types": "Providers[http] Providers[pagerduty]",
+                                "description": "informatica...pagerduty",
+                                "test_types": "Providers[informatica] Providers[pagerduty]",
                             },
                         ]
                     ),
@@ -1321,7 +1321,7 @@ def test_excluded_providers():
         {
             "excluded-providers-as-string": json.dumps(
                 {
-                    "3.13": ["apache.beam", "apache.kafka", "fab", "yandex", "ydb"],
+                    "3.13": ["apache.beam", "fab"],
                 }
             ),
         },
@@ -1948,7 +1948,7 @@ def test_expected_output_push(
             ),
             {
                 "selected-providers-list-as-string": "amazon apache.beam apache.cassandra apache.kafka "
-                "cncf.kubernetes common.compat common.sql "
+                "cncf.kubernetes common.compat common.messaging common.sql databricks "
                 "facebook google hashicorp http microsoft.azure microsoft.mssql mysql "
                 "openlineage oracle postgres presto salesforce samba sftp ssh standard trino",
                 "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
@@ -1960,7 +1960,7 @@ def test_expected_output_push(
                 "skip-providers-tests": "false",
                 "docs-build": "true",
                 "docs-list-as-string": "apache-airflow helm-chart amazon apache.beam apache.cassandra "
-                "apache.kafka cncf.kubernetes common.compat common.sql facebook google hashicorp http microsoft.azure "
+                "apache.kafka cncf.kubernetes common.compat common.messaging common.sql databricks facebook google hashicorp http microsoft.azure "
                 "microsoft.mssql mysql openlineage oracle postgres "
                 "presto salesforce samba sftp ssh standard trino",
                 "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_NO_UI,
@@ -1974,7 +1974,7 @@ def test_expected_output_push(
                         {
                             "description": "amazon...standard",
                             "test_types": "Providers[amazon] Providers[apache.beam,apache.cassandra,"
-                            "apache.kafka,cncf.kubernetes,common.compat,common.sql,facebook,"
+                            "apache.kafka,cncf.kubernetes,common.compat,common.messaging,common.sql,databricks,facebook,"
                             "hashicorp,http,microsoft.azure,microsoft.mssql,mysql,"
                             "openlineage,oracle,postgres,presto,salesforce,samba,sftp,ssh,trino] "
                             "Providers[google] "
@@ -2245,7 +2245,7 @@ def test_upgrade_to_newer_dependencies(
             ("providers/google/docs/some_file.rst",),
             {
                 "docs-list-as-string": "amazon apache.beam apache.cassandra apache.kafka "
-                "cncf.kubernetes common.compat common.sql facebook google hashicorp http "
+                "cncf.kubernetes common.compat common.messaging common.sql databricks facebook google hashicorp http "
                 "microsoft.azure microsoft.mssql mysql openlineage oracle "
                 "postgres presto salesforce samba sftp ssh standard trino",
             },
